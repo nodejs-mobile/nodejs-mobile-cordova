@@ -1,5 +1,4 @@
 var fs = require('fs');
-var targz2 = require('tar.gz2');
 
 const nodeProjectFolder = 'www/nodejs-project';
 const nodeMobileFolderPath = 'plugins/nodejs-mobile-cordova/libs/ios/nodemobile/';
@@ -17,16 +16,22 @@ module.exports = function(context) {
   return new Promise((resolve, reject) => {
       // Unzip and untar the libnode.Framework
     if (fs.existsSync(zipFilePath)) {
-        targz2().extract(zipFilePath, nodeMobileFolderPath, function(err) {
-        if (err) {
-            reject(err);
-        } else {
-            fs.unlinkSync(zipFilePath);
-            resolve();
-        }
-        });
+
+      var tar = require('tar');
+      tar.extract({
+        cwd: nodeMobileFolderPath,
+        file: zipFilePath,
+        onwarn: (code,msg,err) => {
+          reject(err);
+        },
+      })
+      .then(_ => {
+        fs.unlinkSync(zipFilePath);
+        resolve();
+      });
+
     } else if (!fs.existsSync(nodeMobileFilePath)) {
-        reject(new Error(nodeMobileFileName + ' is missing'));
+      reject(new Error(nodeMobileFileName + ' is missing'));
     } else {
         resolve();
     }
