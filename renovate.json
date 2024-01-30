@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:base",
+    ":timezone(Asia/Tokyo)"
+  ],
+  "includeForks": true,
+  "rangeStrategy": "pin",
+  "major": {
+    "automerge": false
+  },
+  "nodenv": {
+    "enabled": true,
+    "automerge": true,
+    "platformAutomerge": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "platformAutomerge": true
+  },
+  "packageRules": [
+    {
+      "automerge": true,
+      "platformAutomerge": true,
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"]
+    },
+    {
+      "enabled": false,
+      "matchPackageNames": ["xcode", "cordova-ios"]
+    }
+  ]
+}

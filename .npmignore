@@ -1,0 +1,20 @@
+# Testing, code coverage, and linting
+.eslintignore
+.eslintrc.yml
+.jshinrc
+.node-version
+.editorconfig
+
+# Git
+.git
+.gitattributes
+.gitignore
+
+# Github
+.github
+
+# test
+tests/
+testapp/
+
+zipLibNode.js

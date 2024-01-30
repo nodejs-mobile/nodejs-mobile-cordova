@@ -1,12 +1,15 @@
-ext.cdvMinSdkVersion = 22
-
 buildscript {
     repositories {
         jcenter()
     }
 }
 
+def _nodeMinSdkVersion = 24
+ext.cdvMinSdkVersion = _nodeMinSdkVersion
+def _compileNativeModulesSdkVersion=_nodeMinSdkVersion;
+
 android {
+    ndkVersion "24.0.8215888"
     defaultConfig {
         externalNativeBuild {
             cmake {
@@ -25,9 +28,8 @@ android {
     lintOptions {
         abortOnError false
     }
-	
+
     packagingOptions {
-        pickFirst 'lib/x86/libnode.so'
         pickFirst 'lib/armeabi-v7a/libnode.so'
         pickFirst 'lib/arm64-v8a/libnode.so'
         pickFirst 'lib/x86_64/libnode.so'
@@ -38,11 +40,9 @@ import org.gradle.internal.os.OperatingSystem;
 import org.gradle.util.GradleVersion;
 
 cdvPluginPostBuildExtras += { ->
-    if (android.defaultConfig.ndk.abiFilters == null) {
-        // No abiFilter is defined for the build. Set it to the supported architectures.
-        logger.warn("nodejs-mobile-cordova detected no ABI filters were set. Will use [\"armeabi-v7a\", \"x86\", \"arm64-v8a\", \"x86_64\"].");
-        android.defaultConfig.ndk.abiFilters = ["armeabi-v7a", "x86", "arm64-v8a", "x86_64"] as Set<String>;
-    }
+    // Set it to the supported architectures.
+    logger.info("nodejs-mobile-cordova were set [\"armeabi-v7a\", \"arm64-v8a\", \"x86_64\"] for ABI filters.");
+    android.defaultConfig.ndk.abiFilters = ["armeabi-v7a", "arm64-v8a", "x86_64"] as Set<String>;
 
     // gzip files will cause errors with aapt. Remove them for improved npm compatibility.
     android.aaptOptions.ignoreAssetsPattern += ":!*.gz";
@@ -133,46 +133,54 @@ cdvPluginPostBuildExtras += { ->
             String temp_cc_ver = '4.9';
             String temp_dest_cpu;
             String temp_v8_arch;
-            String temp_suffix;
-            String temp_toolchain_name;
+            String temp_binutils_prefix;
+            String temp_compiler_prefix;
+            String cargo_build_target;
             switch ( temp_arch )
             {
                 case 'arm':
                     temp_dest_cpu = "${temp_arch}"
                     temp_v8_arch = "${temp_arch}"
-                    temp_suffix = "${temp_arch}-linux-androideabi"
-                    temp_toolchain_name = "${temp_suffix}"
-                    break
-                case 'x86':
-                    temp_dest_cpu = 'ia32'
-                    temp_v8_arch = 'ia32'
-                    temp_suffix = 'i686-linux-android'
-                    temp_toolchain_name = "${temp_arch}"
+                    temp_binutils_prefix = "arm-linux-androideabi"
+                    temp_compiler_prefix = "armv7a-linux-androideabi${_compileNativeModulesSdkVersion}"
+                    cargo_build_target = 'arm-linux-androideabi'
                     break
                 case 'x86_64':
                     temp_dest_cpu = 'x64'
                     temp_v8_arch = 'x64'
-                    temp_suffix = "${temp_arch}-linux-android"
-                    temp_toolchain_name = "${temp_arch}"
+                    temp_binutils_prefix = "x86_64-linux-android"
+                    temp_compiler_prefix = "x86_64-linux-android${_compileNativeModulesSdkVersion}"
+                    cargo_build_target = "x86_64-linux-android"
                     break
                 case 'arm64':
                     temp_dest_cpu = "${temp_arch}"
                     temp_v8_arch = "${temp_arch}"
-                    temp_suffix = 'aarch64-linux-android'
-                    temp_toolchain_name = 'aarch64'
+                    temp_binutils_prefix = "aarch64-linux-android"
+                    temp_compiler_prefix = "aarch64-linux-android${_compileNativeModulesSdkVersion}"
+                    cargo_build_target = "aarch64-linux-android"
                     break
                 default:
                     throw new GradleException("Unsupported architecture for nodejs-mobile native modules: ${temp_arch}")
                     break
             }
 
+            String temp_host_tag
+            if (OperatingSystem.current().isMacOsX()) {
+                temp_host_tag = 'darwin-x86_64'
+            } else if (OperatingSystem.current().isLinux()) {
+                temp_host_tag = 'linux-x86_64'
+            } else {
+              throw new GradleException("Unsupported operating system for nodejs-mobile native builds: ${OperatingSystem.current().getName()}")
+            }
+
             String ndk_bundle_path = android.ndkDirectory
-            String standalone_toolchain = "${rootProject.buildDir}/standalone-toolchains/${temp_toolchain_name}"
-            String npm_toolchain_add_to_path = "${rootProject.buildDir}/bin"
-            String npm_toolchain_ar = "${standalone_toolchain}/bin/${temp_suffix}-ar"
-            String npm_toolchain_cc = "${standalone_toolchain}/bin/${temp_suffix}-clang"
-            String npm_toolchain_cxx = "${standalone_toolchain}/bin/${temp_suffix}-clang++"
-            String npm_toolchain_link = "${standalone_toolchain}/bin/${temp_suffix}-clang++"
+            String toolchain_path = "${ndk_bundle_path}/toolchains/llvm/prebuilt/${temp_host_tag}"
+            String npm_toolchain_ar = "${toolchain_path}/bin/llvm-ar"
+            String npm_toolchain_cc = "${toolchain_path}/bin/${temp_compiler_prefix}-clang"
+            String npm_toolchain_cxx = "${toolchain_path}/bin/${temp_compiler_prefix}-clang++"
+            String npm_toolchain_link = "${toolchain_path}/bin/${temp_compiler_prefix}-clang++"
+            String npm_toolchain_ranlib = "${toolchain_path}/bin/llvm-ranlib"
+            String cargo_target_triple = cargo_build_target.toUpperCase().replaceAll('-', '_')
 
             String npm_gyp_defines = "target_arch=${temp_arch}"
             npm_gyp_defines += " v8_target_arch=${temp_v8_arch}"
@@ -216,34 +224,84 @@ cdvPluginPostBuildExtras += { ->
                 }
             }
 
-            task "MakeToolchain${abi_name}" (type:Exec) {
-                description = "Building a native toolchain to compile nodejs-mobile native modules for ${abi_name}."
-                executable = "${ndk_bundle_path}/build/tools/make-standalone-toolchain.sh"
-                args "--toolchain=${temp_toolchain_name}-${temp_cc_ver}", "--arch=${temp_arch}", "--install-dir=${standalone_toolchain}", "--stl=libc++", "--force", "--platform=android-22"
-                outputs.file "${standalone_toolchain}"
+            task "DeleteIncorrectPrebuilds${abi_name}" (type:Delete) {
+                dependsOn "CopyNodeProjectAssets${abi_name}"
+                description = "Delete all .node files except the prebuilt ones for ${abi_name}."
+
+                delete fileTree(dir: "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/nodejs-project/node_modules/").matching {
+                    include "**/*.node" // Look for all .node files
+                    exclude "**/prebuilds/android-${temp_v8_arch}/*" // Don't touch the correct prebuilds
+                }
+            }
+
+            task "DetectCorrectPrebuilds${abi_name}" {
+                dependsOn "DeleteIncorrectPrebuilds${abi_name}"
+                description = "Handle npm packages that have a correct prebuild for ${abi_name}."
+                inputs.file "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/copy.timestamp"
+                outputs.dir "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/nodejs-project/"
+
+                doLast {
+                    def correctDotNodes = fileTree(dir: "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/nodejs-project/node_modules/").matching {
+                        include "**/prebuilds/android-${temp_v8_arch}/*.node"
+                    }
+                    for (dotNode in correctDotNodes) {
+                        def moduleRoot = file("${dotNode.getAbsoluteFile()}/../../..")
+                        def moduleName = moduleRoot.getName()
+                        println "Preparing to use the prebuild in ${moduleName}"
+                        delete "${moduleRoot}/build"
+                        copy {
+                            from "${dotNode.getAbsoluteFile()}"
+                            into "${moduleRoot}/build/Release/"
+                        }
+                        exec {
+                            workingDir moduleRoot
+                            commandLine 'sed', '-i.bak', 's/"install"/"dontinstall"/g; s/"rebuild"/"dontrebuild"/g; s/"gypfile"/"dontgypfile"/g', 'package.json'
+                        }
+                        delete "${moduleRoot}/binding.gyp"
+                        delete "${moduleRoot}/prebuilds"
+                    }
+                }
             }
 
             task "BuildNpmModules${abi_name}" (type:Exec) {
-                dependsOn "MakeToolchain${abi_name}"
-                dependsOn "CopyNodeProjectAssets${abi_name}"
-                inputs.file "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/copy.timestamp"
-                outputs.file "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/nodejs-project/"
+                dependsOn "DetectCorrectPrebuilds${abi_name}"
                 description = "Building native modules for ${abi_name}."
+                inputs.file "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/copy.timestamp"
+                outputs.dir "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/nodejs-project/"
                 workingDir "${rootProject.buildDir}/nodejs-native-assets-temp-build/nodejs-native-assets-${abi_name}/nodejs-project/"
-                commandLine npmCommandName, '--verbose', 'rebuild', '--build-from-source'
-                //environment ('PATH', "${npm_toolchain_add_to_path}" + System.getProperty("path.separator") + "${System.env.PATH}")
-                environment ('npm_config_node_engine', 'v8' )
-                environment ('npm_config_nodedir', "${project.projectDir}/libs/cdvnodejsmobile/libnode/" )
+
                 String npm_gyp_path_to_use;
-                if( file("${rootProject.projectDir}/../../plugins/nodejs-mobile-cordova/node_modules/nodejs-mobile-gyp/bin/node-gyp.js").exists() ) {
+
+                new ByteArrayOutputStream().withStream { outputStream ->
+                    def commandResult = exec {
+                        commandLine 'node', '-e', "console.log(require.resolve(\"nodejs-mobile-gyp\"))"
+                        ignoreExitValue = true
+                        standardOutput = outputStream
+                    }
+                    npm_gyp_path_to_use = outputStream.toString().trim();
+                }
+
+                if(npm_gyp_path_to_use && file(npm_gyp_path_to_use).exists() ) {
+                    // We resolved likely to the lib file, we want the bin file.
+                    npm_gyp_path_to_use = "${file(npm_gyp_path_to_use).getParentFile().getParentFile().toString()}/bin/node-gyp.js";
+                } else if( file ("${workingDir}/node_modules/nodejs-mobile-gyp/bin/node-gyp.js").exists() ) {
+                    npm_gyp_path_to_use = "${workingDir}/node_modules/nodejs-mobile-gyp/bin/node-gyp.js";
+                } else if( file("${rootProject.projectDir}/../../plugins/nodejs-mobile-cordova/node_modules/nodejs-mobile-gyp/bin/node-gyp.js").exists() ) {
                     npm_gyp_path_to_use = "${rootProject.projectDir}/../../plugins/nodejs-mobile-cordova/node_modules/nodejs-mobile-gyp/bin/node-gyp.js";
                 } else {
                     npm_gyp_path_to_use = "${rootProject.projectDir}/../../node_modules/nodejs-mobile-gyp/bin/node-gyp.js";
                 }
-                environment ('npm_config_node_gyp', npm_gyp_path_to_use)
+
+                logger.warn("npm_gyp_path_to_use: ${npm_gyp_path_to_use}");
+
+                environment ('npm_config_node_engine', 'v8' )
+                environment ('npm_config_nodedir', "${project.projectDir}/libs/cdvnodejsmobile/libnode/" )
+                environment ('npm_config_node_gyp', "${npm_gyp_path_to_use}")
                 environment ('npm_config_arch', temp_arch)
                 environment ('npm_config_platform', 'android')
                 environment ('npm_config_format', 'make-android')
+                environment ('PROJECT_DIR', "${rootProject.projectDir}")
+                environment ('NODEJS_MOBILE_GYP', "${npm_gyp_path_to_use}")
 
                 // Adds the original project .bin to the path. It's a workaround
                 // to correctly build some modules that depend on symlinked modules,
@@ -253,12 +311,19 @@ cdvPluginPostBuildExtras += { ->
                     environment ('PATH', "${original_project_bin}" + System.getProperty("path.separator") + "${System.env.PATH}")
                 }
 
-                environment ('TOOLCHAIN',"${standalone_toolchain}")
-                environment ('AR',"${npm_toolchain_ar}")
-                environment ('CC',"${npm_toolchain_cc}")
-                environment ('CXX',"${npm_toolchain_cxx}")
-                environment ('LINK',"${npm_toolchain_link}")
-                environment ('GYP_DEFINES',"${npm_gyp_defines}")
+                environment ('CARGO_BUILD_TARGET', "${cargo_build_target}")
+                environment ("CARGO_TARGET_${cargo_target_triple}_AR", "${npm_toolchain_ar}")
+                environment ("CARGO_TARGET_${cargo_target_triple}_LINKER", "${npm_toolchain_link}")
+
+                environment ('TOOLCHAIN', "${toolchain_path}")
+                environment ('AR', "${npm_toolchain_ar}")
+                environment ('CC', "${npm_toolchain_cc}")
+                environment ('CXX', "${npm_toolchain_cxx}")
+                environment ('LINK', "${npm_toolchain_link}")
+                environment ('RANLIB', "${npm_toolchain_ranlib}")
+                environment ('GYP_DEFINES', "${npm_gyp_defines}")
+
+                commandLine npmCommandName, '--verbose', '--foreground-scripts', 'rebuild', '--build-from-source'
             }
 
             task "CopyBuiltNpmAssets${abi_name}" (type:Sync) {
@@ -273,7 +338,7 @@ cdvPluginPostBuildExtras += { ->
             task "GenerateNodeNativeAssetsLists${abi_name}" {
                 dependsOn "CopyBuiltNpmAssets${abi_name}"
                 description "Generates a list for runtime copying"
-                inputs.file "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/"
+                inputs.dir "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/"
                 outputs.file "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/file.list"
                 outputs.file "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/dir.list"
                 doLast{
@@ -283,20 +348,35 @@ cdvPluginPostBuildExtras += { ->
                     }
                     delete "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/file.list"
                     delete "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/dir.list"
+
+                    ArrayList<String> file_list_arr = new ArrayList<String>();
+                    ArrayList<String> dir_list_arr = new ArrayList<String>();
                     String file_list = "";
                     String dir_list = "";
 
                     def assets_tree = fileTree(dir: "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/" )
                     assets_tree.visit { assetFile ->
                         if (assetFile.isDirectory()) {
-                        dir_list+="${assetFile.relativePath}\n"
+                          dir_list_arr.add("${assetFile.relativePath}\n");
                         } else {
-                        file_list+="${assetFile.relativePath}\n"
+                          file_list_arr.add("${assetFile.relativePath}\n");
                         }
                     }
+
+                    //Ensure both files are ordered similarly across builds.
+                    Collections.sort(file_list_arr);
+                    Collections.sort(dir_list_arr);
+
                     def file_list_path = new File( "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/file.list")
+                    for (String file : file_list_arr){
+                      file_list += file;
+                    }
                     file_list_path.write file_list
+
                     def dir_list_path = new File( "${rootProject.buildDir}/nodejs-native-assets/nodejs-native-assets-${abi_name}/dir.list")
+                    for (String dir : dir_list_arr){
+                      dir_list += dir;
+                    }
                     dir_list_path.write dir_list
                 }
             }
